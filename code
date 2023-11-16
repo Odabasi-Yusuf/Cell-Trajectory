@@ -1,0 +1,241 @@
+library(Seurat)
+library(SeuratObject)
+library(SeuratWrappers)
+library(WGCNA)
+library(hdWGCNA)
+library(cowplot)
+library(tidyverse)
+library(patchwork)
+library(monocle3)
+library(viridis)
+library(DESeq2)
+
+
+theme_set(theme_cowplot())
+enableWGCNAThreads(nThreads =4)
+
+
+load("Samarasinghe_2021_seurat_object.RData")
+seurat_objt <- subset(datExpr, subset= new.cluster.ids %in% c("Cycling_Prog.","RGCs","oRGs","IPCs","CFuPNs","CPNs","Inh.Neurons"))
+seurat_objt <- subset(seurat_objt, subset = Time %in% c("D70"))
+plot <- DimPlot(seurat_objt, label = T)
+plott <- DimPlot(seurat_objt, group.by = "Genotype", label = T)
+
+
+count <- seurat_objt@assays$RNA@counts + 1
+interestedgenes <- c("SOX4","SOX11","TUBB","BCL11A","OCIAD2","NFIB","NEUROD6","ABRACL","CCNI","FRMB4B")
+counts <- count[rownames(count) %in% interestedgenes,]
+#count <- as.matrix(count)
+genotype <- seurat_objt$Genotype
+metadata <- as.data.frame(genotype)
+factor_col <- sapply(metadata,is.factor)
+dds <- DESeqDataSetFromMatrix(counts, metadata,~genotype)
+dds$genotype <- relevel(dds$genotype, ref = "Ctrl")
+dds <- DESeq(dds)
+res2 <- results(dds, alpha=0.05)
+res2 <- na.omit(res2)
+saveRDS(res2, "pm_deseq2.rds") 
+
+
+CTRL <- subset(seurat_obj, subset = Genotype %in% c("Ctrl"))
+RETT <- subset(seurat_objt, subset = Genotype %in% c("Rett"))
+
+CTRL <- FindVariableFeatures(object = CTRL)
+DefaultAssay(CTRL) <- "RNA"
+CTRL <- ScaleData(CTRL)
+CTRL <- RunPCA(CTRL, npcs = 50)
+ElbowPlot(CTRL)
+CTRL <- RunUMAP(CTRL, dims = 1:15)
+CTRL <- FindNeighbors(CTRL, dims = 1:15) %>% FindClusters(resolution = 0.3)
+CTRL <- SetIdent(CTRL, value = CTRL$new.cluster.ids)
+CTRL$new.cluster.ids <- CTRL@active.ident
+p0 <- DimPlot(CTRL, label = T)
+
+RETT <- FindVariableFeatures(object = RETT)
+DefaultAssay(RETT) <- "RNA"
+RETT <- ScaleData(RETT)
+RETT <- RunPCA(RETT, npcs = 50)
+ElbowPlot(CTRL)
+RETT <- RunUMAP(RETT, dims = 1:13)
+RETT <- FindNeighbors(RETT, dims = 1:13) %>% FindClusters(resolution = 0.3)
+DimPlot(RETT, group.by = "new.cluster.ids", label = T)
+RETT <- SetIdent(RETT, value = RETT$new.cluster.ids)
+rp0 <- DimPlot(RETT, label = T)
+
+cds <- as.cell_data_set(CTRL)
+cds <- cluster_cells(cds, reduction_method='UMAP')
+cds <- learn_graph(cds)
+
+cdsr <- as.cell_data_set(RETT)
+cdsr <- cluster_cells(cdsr, reduction_method='UMAP')
+cdsr <- learn_graph(cdsr)
+
+rp1 <- plot_cells(
+  cds = cdsr,
+  color_cells_by = "ident",
+  show_trajectory_graph = TRUE,
+  label_principal_points = TRUE
+) 
+
+rp2 <- plot_cells(
+  cds = cdsr,
+  color_cells_by = "partition",
+  show_trajectory_graph = FALSE
+)
+
+(p0 / (p1 + p2))
+
+rprincipal_node <- c('Y_57')
+cdsr <- order_cells(cdsr,root_pr_nodes = rprincipal_node)
+RETT$pseudotime <- pseudotime(cdsr)
+
+CTRL$ipc_pseudotime <- ifelse(CTRL$new.cluster.ids %in% c("IPCs", "CPNs", 'CFuPNs', 'Inh.Neurons'), CTRL$pseudotime, NA)
+CTRL$cyc_pseudotime <- ifelse(CTRL$new.cluster.ids %in% c("Cycling_Prog.", "oRGs", 'RGCs'), CTRL$pseudotime, NA)
+
+RETT$gli_pseudotime <- ifelse(RETT$new.cluster.ids %in% c("oRGs","RGCs"), RETT$pseudotime, NA)
+RETT$tek_pseudotime <- ifelse(RETT$new.cluster.ids %in% c("oRGs","Cycling_Prog.","IPCs","CPNs","CFuPNs","Inh.Neurons"), RETT$pseudotime, NA)
+
+RETT$ipc_pseudotime <- ifelse(RETT$new.cluster.ids %in% c("IPCs", "CPNs", 'CFuPNs', 'Inh.Neurons'), RETT$pseudotime, NA)
+RETT$cyc_pseudotime <- ifelse(RETT$new.cluster.ids %in% c("Cycling_Prog.", "oRGs", 'RGCs'), RETT$pseudotime, NA)
+
+CTRL$UMAP1 <- CTRL@reductions$umap@cell.embeddings[,1]
+CTRL$UMAP2 <- CTRL@reductions$umap@cell.embeddings[,2]
+
+RETT$UMAP1 <- RETT@reductions$umap@cell.embeddings[,1]
+RETT$UMAP2 <- RETT@reductions$umap@cell.embeddings[,2]
+
+p11 <- CTRL@meta.data %>%
+  ggplot(aes(x=UMAP1, y=UMAP2, color=ipc_pseudotime)) +
+  ggrastr::rasterise(geom_point(size=1), dpi=500, scale=0.75) +
+  coord_equal() +
+  scale_color_gradientn(colors=plasma(256), na.value='grey') +
+  umap_theme()
+p22 <- CTRL@meta.data %>%
+  ggplot(aes(x=UMAP1, y=UMAP2, color=cyc_pseudotime)) +
+  ggrastr::rasterise(geom_point(size=1), dpi=500, scale=0.75) +
+  coord_equal() +
+  scale_color_gradientn(colors=viridis(256), na.value='grey') +
+  umap_theme()
+
+p11 + p22
+
+
+rrp11 <- RETT@meta.data %>%
+  ggplot(aes(x=UMAP1, y=UMAP2, color=ipc_pseudotime)) +
+  ggrastr::rasterise(geom_point(size=1), dpi=500, scale=0.75) +
+  coord_equal() +
+  scale_color_gradientn(colors=plasma(256), na.value='grey') +
+  umap_theme()
+rrp22 <- RETT@meta.data %>%
+  ggplot(aes(x=UMAP1, y=UMAP2, color=cyc_pseudotime)) +
+  ggrastr::rasterise(geom_point(size=1), dpi=500, scale=0.75) +
+  coord_equal() +
+  scale_color_gradientn(colors=viridis(256), na.value='grey') +
+  umap_theme()
+
+
+rseurat_obj <- SetupForWGCNA(
+  RETT,
+  gene_select = "fraction",
+  fraction = 0.05,
+  wgcna_name = 'Rtrajectory'
+)
+
+rseurat_obj$ident <- cdsr@colData$ident
+rseurat_obj <- MetacellsByGroups(
+  seurat_obj = rseurat_obj,
+  group.by = "ident",
+  k = 50,
+  target_metacells=250,
+  ident.group = 'ident',
+  min_cells=0,
+  max_shared=5,
+)
+
+rseurat_obj <- NormalizeMetacells(rseurat_obj)
+
+rgn <- c("IPCs","CPNs","CFuPNs","Inh.Neurons","Cycling_Prog.","oRGs","RGCs")
+# setup expression matrix
+rseurat_obj <- SetDatExpr(
+  rseurat_obj,
+  group.by='ident',
+  group_name = rgn,
+  assay = 'RNA',
+  slot = 'data'
+)
+
+rseurat_obj <- TestSoftPowers(
+  rseurat_obj,
+  networkType = 'signed' # you can also use "unsigned" or "signed hybrid"
+)
+plot_list <- PlotSoftPowers(rseurat_obj)
+wrap_plots(plot_list, ncol=2)
+
+rseurat_obj <- ConstructNetwork(
+  rseurat_obj, soft_power=7, 
+  tom_name = 'Rtrajectory', overwrite_tom=TRUE)
+
+PlotDendrogram(seurat_obj, main='CTRL hdWGCNA Dendrogram')
+rseurat_obj <- ScaleData(rseurat_obj, features=VariableFeatures(rseurat_obj))
+
+rseurat_obj <- ModuleEigengenes(rseurat_obj)
+rhMEs <- GetMEs(rseurat_obj)
+rseurat_obj <- ModuleConnectivity(rseurat_obj)
+
+rmodules <- GetModules(rseurat_obj)
+rmods <- levels(rmodules$module)
+rmods <- rmods[rmods!='grey']
+
+rmeta <- rseurat_obj@meta.data
+rseurat_obj@meta.data <- cbind(rmeta, rhMEs)
+
+rp <- DotPlot(
+  rseurat_obj,
+  group.by='ident',
+  features = rev(rmods)
+) + RotatedAxis() +
+  scale_color_gradient2(high='red', mid='grey95', low='blue') + xlab('') + ylab('') +
+  theme(
+    plot.title = element_text(hjust = 0.5),
+    axis.line.x = element_blank(),
+    axis.line.y = element_blank(),
+    panel.border = element_rect(colour = "black", fill=NA, size=1)
+  )
+rseurat_obj@meta.data <- rmeta
+
+rp3  <- PlotModuleTrajectory(
+  rseurat_obj,
+  pseudotime_col = 'ipc_pseudotime'
+)
+
+p33  <- PlotModuleTrajectory(
+  seurat_obj,
+  pseudotime_col = 'cyc_pseudotime'
+)
+library(MetBrewer)
+rrp4  <- PlotModuleTrajectory(
+  rseurat_obj,
+  pseudotime_col = c('ipc_pseudotime', 'cyc_pseudotime'),
+  group_colors = paste0(met.brewer("Lakota", n=2, type='discrete'))
+)
+
+pp <- PlotKMEs(seurat_obj, ncol=5)
+rpp <- PlotKMEs(rseurat_obj, ncol=5)
+
+hub_df <- GetHubGenes(seurat_obj, n_hubs = 10)
+rhub_df <- GetHubGenes(rseurat_obj, n_hubs = 10)
+
+plot_list <- ModuleFeaturePlot(
+  seurat_obj,
+  features='hMEs', # plot the hMEs
+  order=TRUE # order so the points with highest hMEs are on top
+)
+
+rplot_list <- ModuleFeaturePlot(
+  rseurat_obj,
+  features='hMEs', # plot the hMEs
+  order=TRUE # order so the points with highest hMEs are on top
+)
+
+ps <- wrap_plots(plot_list, ncol=5)
+rps <- wrap_plots(rplot_list, ncol =5)
